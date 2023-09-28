@@ -5,6 +5,8 @@ import threading
 import time
 import numpy as np
 import sys
+import os
+import pickle
 
 def bounce_grbl(gm):
     direction=None
@@ -37,7 +39,7 @@ if __name__=='__main__':
     args = parser.parse_args()
 
     #setup output recorder
-    record_matrix = np.memmap(args.out, dtype='float32', mode='w+', shape=(args.record_n,5))
+    record_matrix = np.memmap(args.out, dtype='float32', mode='w+', shape=(args.record_n,5+65))
 
     #setup GRBL
     gm=GRBLManager(args.grbl_serial)
@@ -68,8 +70,15 @@ if __name__=='__main__':
         while not gm.position['is_moving']:
             print("wait for movement")
             time.sleep(1)
+
         #get some data
-        signal_matrix=sdr_rx.rx()
+        try:
+            signal_matrix=sdr_rx.rx()
+        except Exception as e:
+            print("Failed to receive RX data! removing file",e)
+            os.remove(args.out)
+            break
+        signal_matrix[1]*=np.exp(1j*sdr_rx.phase_calibration)
         current_time=time.time()-time_offset # timestamp
 
         beam_thetas,beam_sds,beam_steer=beamformer(
@@ -80,9 +89,23 @@ if __name__=='__main__':
 
         avg_phase_diff=get_avg_phase(signal_matrix)
         xy=gm.position['xy']
-        record_matrix[idx]=np.array([current_time,xy[0],xy[1],avg_phase_diff[0],avg_phase_diff[1]])
-        print(record_matrix[idx])
-        time.sleep(1.0/args.record_freq)
+        record_matrix[idx]=np.hstack(
+                [
+                    np.array([current_time,xy[0],xy[1],avg_phase_diff[0],avg_phase_diff[1]]),
+                    beam_sds])
+        #time.sleep(1.0/args.record_freq)
+
+        if idx%50==0:
+            elapsed=time.time()-time_offset
+            rate=elapsed/(idx+1)
+            print(idx,
+                    "mean: %0.4f" % avg_phase_diff[0],
+                    "_mean: %0.4f" % avg_phase_diff[1],
+                    "%0.4f" % (100.0*float(idx)/args.record_n),
+                    '%',
+                    "elapsed(min): %0.1f" % (elapsed/60),
+                    "rate(s/idx): %0.3f" % rate,
+                    "remaining(min): %0.3f" % ((args.record_n-idx)*rate/60))
     gm.collect=False
     print("Done collecting!")
     gm_thread.join()
